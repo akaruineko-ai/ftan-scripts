@@ -39,6 +39,18 @@ def _split_df(df, split_name):
     return df[df["split"] == split_name].drop(columns=["split"]).reset_index(drop=True)
 
 
+def _clean_dir(path):
+    """Remove stray cache artifacts that break Hub auto-processing."""
+    if not path.exists():
+        return
+    for p in path.glob("cache-*.arrow"):
+        p.unlink()
+    for split_dir in path.iterdir():
+        if split_dir.is_dir():
+            for p in split_dir.glob("cache-*.arrow"):
+                p.unlink()
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--eval_obfuscation", action="store_true", default=True,
@@ -55,14 +67,14 @@ def main():
     splits = {}
     for name in ("train", "validation", "test"):
         d = _split_df(df, name)
-        splits[name] = Dataset.from_pandas(d, features=FEATURES)
+        splits[name] = Dataset.from_pandas(d, features=FEATURES, preserve_index=False)
         print(f"  {name}: {len(d):,}")
 
     if args.eval_obfuscation:
         obf = _split_df(df, "test")
         obf = obf[obf["mutated"] == 1].reset_index(drop=True)
         if len(obf):
-            splits["test_obfuscated"] = Dataset.from_pandas(obf, features=FEATURES)
+            splits["test_obfuscated"] = Dataset.from_pandas(obf, features=FEATURES, preserve_index=False)
             print(f"  test_obfuscated: {len(obf):,}")
         else:
             print("  test_obfuscated: empty, skipping")
@@ -70,7 +82,9 @@ def main():
     dsd = DatasetDict(splits)
     FINAL_DIR.mkdir(parents=True, exist_ok=True)
     out = FINAL_DIR / "dataset"
+    _clean_dir(out)
     dsd.save_to_disk(str(out))
+    _clean_dir(out)
     print(f"\nsaved DatasetDict to {out}")
 
     stats = {

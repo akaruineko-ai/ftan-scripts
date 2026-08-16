@@ -4,5 +4,6 @@ __pycache__/
 data/raw/
 data/processed/
 data/final/
+cache-*.arrow
 .cache/
 .huggingface/

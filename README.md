@@ -71,6 +71,22 @@ Current build (~1.37M rows):
   evaluation.
 - Generated dataset is saved under `data/final/` (gitignored).
 
+## Publishing
+
+Two robust ways to upload `data/final/dataset` to the Hugging Face Hub:
+
+```bash
+# 1. from the pipeline (writes parquet, no stray arrow cache files)
+.venv/bin/python scripts/06_export.py --hub_id youruser/ftan-2.0 --private
+
+# 2. upload the on-disk DatasetDict folder directly
+huggingface_hub upload-folder data/final/dataset --repo-type=dataset youruser/ftan-2.0
+```
+
+Do **not** upload `data/processed/*.parquet` or any `cache-*.arrow` files —
+their stray pandas index columns break the Hub's auto-conversion
+(`DatasetGenerationError` / `CastError` on an `indices` column).
+
 ## License / disclaimer
 
 Sources have varied licenses (CC0 for Jigsaw train; research terms for Davidson /
