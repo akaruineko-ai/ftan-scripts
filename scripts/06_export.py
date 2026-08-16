@@ -53,7 +53,7 @@ def _clean_dir(path):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--eval_obfuscation", action="store_true", default=True,
+    ap.add_argument("--eval_obfuscation", action=argparse.BooleanOptionalAction, default=True,
                     help="add a test_obfuscated split with mutated test rows")
     ap.add_argument("--hub_id", default=None,
                     help="push to the Hub under this repo id (e.g. user/name)")

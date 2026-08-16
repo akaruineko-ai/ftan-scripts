@@ -5,6 +5,10 @@ datasets>=2.21,<3
 pandas>=2.0
 numpy>=1.24
 tqdm>=4.66
+requests>=2.28
+
+# --- reddit dump parsing (scripts/07_reddit_fetch.py) ---
+zstandard>=0.22
 
 # --- training / inference (scripts/train.py, scripts/predict.py) ---
 # transformers>=5: the scripts use v5 Trainer APIs (processing_class, warmup_steps).

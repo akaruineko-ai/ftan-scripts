@@ -4,6 +4,7 @@ __pycache__/
 data/raw/
 data/processed/
 data/final/
+data/reddit/
 cache-*.arrow
 .cache/
 .huggingface/

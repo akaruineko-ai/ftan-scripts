@@ -31,6 +31,29 @@ python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 .venv/bin/python scripts/06_export.py --hub_id youruser/ftan-2.0 --private
 ```
 
+Or run the whole thing with the one-shot orchestrator (steps below run in
+dependency order and stream their output; `download` is skipped automatically
+if `data/raw/` already has sources):
+
+```bash
+# build the full core dataset (download -> ... -> export)
+.venv/bin/python scripts/make_dataset.py
+
+# core + reddit expansion in one pass
+.venv/bin/python scripts/make_dataset.py --api \
+    --subreddits PublicFreakout,leagueoflegends,AmItheAsshole \
+    --target_a 1000000 --target_b 1000000 --target_c 1000000 --device 0
+
+# a specific plan: presets are core / reddit / all / train, or any comma list
+.venv/bin/python scripts/make_dataset.py --steps reddit --dump RC_2025-01.zst
+.venv/bin/python scripts/make_dataset.py --steps all,train --device 0
+```
+
+`make_dataset.py` steps: `download, fetch, curate, merge, normalize, mutate,
+dedup, split, export, train, finalize`. `merge` converts the curated reddit
+banks into `data/raw/reddit.parquet` so the core pipeline treats them like any
+other source (mutated, cluster-deduped and split together).
+
 ## Sources
 
 | source | id | role |
@@ -115,6 +138,64 @@ Fine-tune `distilbert-base-uncased` on the dataset:
 printf "you are a f4gg0t and i hate you\nthanks for the help\n" \
     | .venv/bin/python scripts/predict.py --model data/final/model/model
 ```
+
+## Reddit expansion (profanity / direct-insult banks)
+
+The 1.37M-row core dataset is trained mostly on "every profanity counts as
+offensive" sources. To teach a model the difference between *swearing at a
+person* (`fuck you`) and *swearing about a situation* (`fuck i lost my keys`,
+`this is fucking awesome`), collect raw Reddit comments and split them with
+regex + the current FTAN model into three banks:
+
+| bank | bucket | label | meaning |
+|---|---|---|---|
+| `bank_a` | attack | 1 | profanity/insult aimed at a person (2nd-person in a small window, or explicit pattern like `kys`, `fuck off`) |
+| `bank_b` | emotional | 0 | expletive profanity with no addressee — the hard negatives FTAN gets wrong |
+| `bank_c` | clean | 0 | no profanity, no insult |
+| `manual_check` | grey / verify | ? | FTAN cannot decide (conf in `[--grey_low, --grey_high]`) or disagrees with regex — review by hand |
+
+```bash
+# 1. fetch + regex-prefilter comments (Arctic Shift API, the Pushshift successor)
+.venv/bin/python scripts/07_reddit_fetch.py --api \
+    --subreddits PublicFreakout,leagueoflegends,AmItheAsshole \
+    --after 2024-01-01 --max_rows 5000000 --out data/reddit/raw
+
+#    ... or stream a monthly .zst dump (download via torrent, then point at the file)
+.venv/bin/python scripts/07_reddit_fetch.py --dump RC_2025-01.zst \
+    --clean_sample_frac 0.05 --out data/reddit/raw
+
+# 2. regex + FTAN -> banks
+.venv/bin/python scripts/08_reddit_curate.py --raw data/reddit/raw \
+    --target_a 1000000 --target_b 1000000 --target_c 1000000 --device 0
+```
+
+Or run the whole expansion in one go (banks are then merged into the core
+pipeline via the `merge` step of `make_dataset.py`):
+
+```bash
+# one-shot: fetch -> curate -> merge -> normalize -> ... -> export
+.venv/bin/python scripts/make_dataset.py --api \
+    --subreddits PublicFreakout,leagueoflegends,AmItheAsshole \
+    --target_a 1000000 --target_b 1000000 --target_c 1000000 --device 0
+
+# one-shot from an already-downloaded monthly dump
+.venv/bin/python scripts/make_dataset.py --steps reddit --dump RC_2025-01.zst --device 0
+
+# curate only (reuse existing candidates), fetch only, respectively
+.venv/bin/python scripts/make_dataset.py --skip-fetch --device 0
+.venv/bin/python scripts/make_dataset.py --skip-curate --subreddits leagueoflegends
+```
+
+- Regex is the authoritative splitter (`scripts/reddit_vocab.py`); it tolerates
+  light obfuscation (`f*ck`, `f**k`, `sh*t`, `b*tch`) so censored curses are
+  still caught. FTAN (`data/final/model/model`) is only invoked on the **grey**
+  zone — insult words without an addressee (`what an idiot`) — and splits it by
+  confidence into `bank_a` / `bank_c` / `manual_check`.
+- `--verify_frac 0.05` re-checks a random slice of `bank_a`/`bank_c` with FTAN
+  and pulls disagreements into `manual_check` (catch regex misses).
+- The dumps are hosted on Academic Torrents (see
+  `download_links.md` in the arctic-shift repo); `--clean_sample_frac` keeps
+  only a fraction of regex-clean comments so the clean bank doesn't balloon.
 
 ## License / disclaimer
 
