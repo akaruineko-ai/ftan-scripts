@@ -87,6 +87,35 @@ Do **not** upload `data/processed/*.parquet` or any `cache-*.arrow` files —
 their stray pandas index columns break the Hub's auto-conversion
 (`DatasetGenerationError` / `CastError` on an `indices` column).
 
+## Fine-tuning
+
+Fine-tune `distilbert-base-uncased` on the dataset:
+
+```bash
+# quick run (~200k rows, ~1 epoch on a GTX 1660 Ti)
+.venv/bin/python scripts/train.py
+
+# full control
+.venv/bin/python scripts/train.py \
+    --model distilbert-base-uncased \
+    --max_train_rows 200000 --max_length 128 \
+    --epochs 1 --batch_size 32 --lr 2e-5 \
+    --output_dir data/final/model
+```
+
+- The training run evaluates on `validation`, held-out `test`, and
+  `test_obfuscated` (mutated rows) and writes `eval_metrics.json`.
+- `--max_train_rows None` uses the full ~1.32M-row train split.
+- The scripts use transformers **v5** APIs (`processing_class`,
+  `warmup_steps`) — keep `transformers>=5.0`.
+
+### Inference
+
+```bash
+printf "you are a f4gg0t and i hate you\nthanks for the help\n" \
+    | .venv/bin/python scripts/predict.py --model data/final/model/model
+```
+
 ## License / disclaimer
 
 Sources have varied licenses (CC0 for Jigsaw train; research terms for Davidson /

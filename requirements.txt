@@ -1,6 +1,16 @@
+# --- data pipeline ---
 # datasets<3 is required: several sources (toxigen, wikipedia) ship loader scripts
 # that were dropped in datasets v3.
 datasets>=2.21,<3
 pandas>=2.0
 numpy>=1.24
 tqdm>=4.66
+
+# --- training / inference (scripts/train.py, scripts/predict.py) ---
+# transformers>=5: the scripts use v5 Trainer APIs (processing_class, warmup_steps).
+# torch: install the CUDA build matching your driver, e.g.
+#   pip install torch --index-url https://download.pytorch.org/whl/cu130
+torch>=2.0
+transformers>=5.0
+accelerate>=1.0
+scikit-learn>=1.4
