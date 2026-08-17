@@ -25,14 +25,15 @@ API reference: https://github.com/ArthurHeitmann/arctic_shift/blob/master/api/RE
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import random
 import time
 
 import pandas as pd
 import requests
+from tqdm import tqdm
 
+from candidate_common import Sink, _is_latin
 from common import clean_text
 from reddit_vocab import prefilter_keep
 
@@ -50,15 +51,6 @@ DEFAULT_SUBREDDITS = [
 REMOVED = {"[removed]", "[deleted]", ""}
 
 
-def _is_latin(text: str, min_ratio: float = 0.5) -> bool:
-    """Heuristic: skip comments that are mostly non-Latin (non-English)."""
-    letters = [ch for ch in text if ch.isalpha()]
-    if not letters:
-        return True
-    latin = sum(1 for ch in letters if ord(ch) < 0x250)
-    return latin / len(letters) >= min_ratio
-
-
 # --------------------------------------------------------------------------- #
 # Row-level helpers
 # --------------------------------------------------------------------------- #
@@ -68,57 +60,12 @@ def _row_from_comment(c: dict) -> dict | None:
         return None
     return {
         "text": body,
+        "source": "reddit",
         "subreddit": c.get("subreddit", ""),
         "created_utc": int(c.get("created_utc") or 0),
         "score": int(c.get("score") or 0),
         "id": c.get("id", ""),
     }
-
-
-def _classify_row(row: dict) -> dict:
-    info = classify_regex(row["text"])
-    row["category"] = info["category"]
-    row["profanity"] = int(info["profanity"])
-    row["insult"] = int(info["insult"])
-    row["attack"] = int(info["attack"])
-    return row
-
-
-class Sink:
-    """Collects rows and flushes them to sharded parquet files."""
-
-    def __init__(self, out_dir, flush_rows=500_000):
-        self.out_dir = out_dir
-        self.flush_rows = flush_rows
-        self.rows: list[dict] = []
-        self.seen: set[int] = set()
-        self.shard = 0
-        self.kept = 0
-        self.dropped_dup = 0
-
-    def add(self, row: dict) -> None:
-        digest = int.from_bytes(hashlib.md5(row["text"].encode("utf-8")).digest()[:8], "big")
-        if digest in self.seen:
-            self.dropped_dup += 1
-            return
-        self.seen.add(digest)
-        self.rows.append(row)
-        self.kept += 1
-        if len(self.rows) >= self.flush_rows:
-            self.flush()
-
-    def flush(self) -> None:
-        if not self.rows:
-            return
-        self.out_dir.mkdir(parents=True, exist_ok=True)
-        path = self.out_dir / f"candidates_{self.shard:03d}.parquet"
-        df = pd.DataFrame(self.rows)
-        df.to_parquet(path, index=False)
-        self.rows = []
-        self.shard += 1
-
-    def close(self) -> None:
-        self.flush()
 
 
 # --------------------------------------------------------------------------- #
@@ -156,56 +103,60 @@ def fetch_api(args, sink: Sink, rng) -> None:
         print(f"=== r/{sub} ===")
         before = args.before  # iso date or None
         window = 0
-        while True:
-            params = {
-                "subreddit": sub,
-                "limit": "auto",
-                "sort": "desc",
-                "fields": "body,id,subreddit,created_utc,score",
-            }
-            if args.after:
-                params["after"] = args.after
-            if before:
-                params["before"] = before
+        with tqdm(total=args.max_pages, desc=f"r/{sub}", unit="page", leave=False) as pbar:
+            while True:
+                params = {
+                    "subreddit": sub,
+                    "limit": "auto",
+                    "sort": "desc",
+                    "fields": "body,id,subreddit,created_utc,score",
+                }
+                if args.after:
+                    params["after"] = args.after
+                if before:
+                    params["before"] = before
 
-            data = _api_get("/comments/search", params, retries=args.retries)
-            if not data or not data.get("data"):
-                break
-            comments = data["data"]
-            if not comments:
-                break
+                data = _api_get("/comments/search", params, retries=args.retries)
+                if not data or not data.get("data"):
+                    break
+                comments = data["data"]
+                if not comments:
+                    break
 
-            oldest = None
-            for c in comments:
-                row = _row_from_comment(c)
-                if row is None:
-                    continue
-                if len(row["text"].split()) < args.min_words:
-                    continue
-                if args.require_latin and not _is_latin(row["text"]):
-                    continue
-                info, keep = prefilter_keep(row["text"], args.clean_sample_frac, rng)
-                if keep:
-                    row["category"] = info["category"]
-                    row["profanity"] = int(info["profanity"])
-                    row["insult"] = int(info["insult"])
-                    row["attack"] = int(info["attack"])
-                    sink.add(row)
-                if oldest is None or c["created_utc"] < oldest:
-                    oldest = c["created_utc"]
+                oldest = None
+                for c in comments:
+                    row = _row_from_comment(c)
+                    if row is None:
+                        continue
+                    if len(row["text"].split()) < args.min_words:
+                        continue
+                    if args.require_latin and not _is_latin(row["text"]):
+                        continue
+                    info, keep = prefilter_keep(row["text"], args.clean_sample_frac, rng)
+                    if keep:
+                        row["category"] = info["category"]
+                        row["profanity"] = int(info["profanity"])
+                        row["insult"] = int(info["insult"])
+                        row["attack"] = int(info["attack"])
+                        sink.add(row)
+                    if oldest is None or c["created_utc"] < oldest:
+                        oldest = c["created_utc"]
 
-            if sink.kept >= args.max_rows:
-                print("  reached --max_rows, stopping")
-                return
-
-            if oldest is None:
-                break
-            before = oldest - 1  # epoch seconds, exclusive cursor
-            window += 1
-            if window >= args.max_pages:
-                print(f"  reached {args.max_pages} pages for r/{sub}, stopping")
-                break
-            time.sleep(args.api_delay)
+                if sink.kept >= args.max_rows:
+                    print("  reached --max_rows, stopping")
+                    break
+                if oldest is None:
+                    break
+                before = oldest - 1  # epoch seconds, exclusive cursor
+                window += 1
+                pbar.update(1)
+                pbar.set_postfix(kept=sink.kept)
+                if window >= args.max_pages:
+                    print(f"  reached {args.max_pages} pages for r/{sub}, stopping")
+                    break
+                time.sleep(args.api_delay)
+        if sink.kept >= args.max_rows:
+            break
         print(f"  r/{sub} done (total kept so far: {sink.kept:,})")
 
 
@@ -261,31 +212,32 @@ def iter_comment_dicts(path_or_url: str):
 def fetch_dump(args, sink: Sink, rng) -> None:
     n = 0
     print(f"reading {args.dump} ...")
-    for raw in iter_comment_dicts(args.dump):
-        try:
-            c = json.loads(raw)
-        except (json.JSONDecodeError, TypeError):
-            continue
-        row = _row_from_comment(c)
-        if row is None:
-            continue
-        if len(row["text"].split()) < args.min_words:
-            continue
-        if args.require_latin and not _is_latin(row["text"]):
-            continue
-        info, keep = prefilter_keep(row["text"], args.clean_sample_frac, rng)
-        if keep:
-            row["category"] = info["category"]
-            row["profanity"] = int(info["profanity"])
-            row["insult"] = int(info["insult"])
-            row["attack"] = int(info["attack"])
-            sink.add(row)
-        n += 1
-        if sink.kept >= args.max_rows:
-            print("  reached --max_rows, stopping")
-            break
-        if n % 1_000_000 == 0:
-            print(f"  scanned {n:,} comments | kept {sink.kept:,}")
+    with tqdm(desc="scanning", unit="comment", leave=False) as pbar:
+        for raw in iter_comment_dicts(args.dump):
+            try:
+                c = json.loads(raw)
+            except (json.JSONDecodeError, TypeError):
+                continue
+            row = _row_from_comment(c)
+            if row is None:
+                continue
+            if len(row["text"].split()) < args.min_words:
+                continue
+            if args.require_latin and not _is_latin(row["text"]):
+                continue
+            info, keep = prefilter_keep(row["text"], args.clean_sample_frac, rng)
+            if keep:
+                row["category"] = info["category"]
+                row["profanity"] = int(info["profanity"])
+                row["insult"] = int(info["insult"])
+                row["attack"] = int(info["attack"])
+                sink.add(row)
+            n += 1
+            if sink.kept >= args.max_rows:
+                print("  reached --max_rows, stopping")
+                break
+            pbar.update(1)
+            pbar.set_postfix(scanned=n, kept=sink.kept)
     print(f"  scanned {n:,} comments | kept {sink.kept:,}")
 
 

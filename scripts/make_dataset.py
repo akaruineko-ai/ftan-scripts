@@ -58,12 +58,15 @@ FINAL_DIR = ROOT / "data" / "final"
 
 PRESETS = {
     "core": "download,normalize,mutate,dedup,split,export",
-    "reddit": "fetch,curate,merge,normalize,mutate,dedup,split,export",
-    "all": "download,fetch,curate,merge,normalize,mutate,dedup,split,export",
+    "reddit": "fetch,curate,merge,subsample,normalize,mutate,dedup,split,export",
+    "community": "fetch,fetch-4chan,fetch-hf,fetch-youtube,curate,merge,merge-ftan,subsample,normalize,mutate,dedup,split,export",
+    "all": "download,fetch,fetch-4chan,fetch-hf,fetch-youtube,curate,merge,merge-ftan,subsample,normalize,mutate,dedup,split,export",
     "train": "train,finalize",
 }
 STEPS_ORDER = [
-    "download", "fetch", "curate", "merge",
+    "download", "fetch", "fetch-4chan", "fetch-hf", "fetch-youtube", "curate", "merge",
+    "merge-ftan",
+    "subsample",
     "normalize", "mutate", "dedup", "split", "export",
     "train", "finalize",
 ]
@@ -91,6 +94,11 @@ def _run(script: str, argv: list[str]) -> None:
     cmd = [sys.executable, "-u", str(SCRIPTS / script), *argv]
     print(f"\n### {script} {' '.join(argv)}", flush=True)
     subprocess.run(cmd, check=True)
+
+
+def _has_parquets(path: str) -> bool:
+    p = Path(path)
+    return p.is_dir() and bool(list(p.glob("*.parquet")))
 
 
 def _notice(msg: str) -> None:
@@ -147,11 +155,109 @@ def build_fetch_args(args) -> list[str]:
     return a
 
 
+def build_4chan_args(args) -> list[str]:
+    a = ["--live" if args.chan_mode == "live" else "--archive"]
+    if args.boards:
+        a += ["--boards", args.boards]
+    if args.chan_board:
+        a += ["--board", args.chan_board]
+    if args.chan_search:
+        a += ["--search", args.chan_search]
+    a += [
+        "--max_rows", str(args.max_rows),
+        "--min_words", str(args.min_words),
+        "--clean_sample_frac", str(args.clean_sample_frac),
+        "--delay", str(args.chan_delay),
+        "--repeat", str(args.chan_repeats),
+        "--repeat_delay", str(args.chan_repeat_delay),
+        "--out", str(args.chan_out),
+        "--seed", str(args.seed),
+    ]
+    if not args.require_latin:
+        a += ["--no-require_latin"]
+    return a
+
+
+def build_youtube_args(args) -> list[str]:
+    a = [
+        "--api_key", args.yt_api_key,
+        "--query", args.yt_query,
+        "--max_videos", str(args.yt_max_videos),
+        "--max_comments_per_video", str(args.yt_max_comments),
+        "--min_words", str(args.min_words),
+        "--clean_sample_frac", str(args.yt_clean_frac),
+        "--max_rows", str(args.max_rows),
+        "--out", str(args.yt_out),
+        "--seed", str(args.seed),
+    ]
+    if not args.require_latin:
+        a += ["--no-require_latin"]
+    return a
+
+
 def step_fetch(args) -> bool:
     if not (args.api or args.dump):
-        _notice("no --api or --dump given, skipping fetch")
+        _notice("no --api or --dump given, skipping reddit fetch")
         return False
     _run("07_reddit_fetch.py", build_fetch_args(args))
+    return True
+
+
+def step_fetch_4chan(args) -> bool:
+    if not getattr(args, "4chan", False):
+        _notice("no --4chan given, skipping 4chan fetch")
+        return False
+    _run("09_4chan_fetch.py", build_4chan_args(args))
+    return True
+
+
+def step_fetch_youtube(args) -> bool:
+    if not args.youtube:
+        _notice("no --youtube given, skipping youtube fetch")
+        return False
+    if not args.yt_api_key:
+        _notice("--youtube needs --yt-api-key, skipping youtube fetch")
+        return False
+    _run("10_youtube_fetch.py", build_youtube_args(args))
+    return True
+
+
+def build_hf_args(args) -> list[str]:
+    a = [
+        "--dataset", args.hf_dataset,
+        "--split", args.hf_split,
+        "--text-col", args.hf_text_col or "text",
+        "--source-col", args.hf_source_col or "board",
+        "--time-col", args.hf_time_col or "timestamp",
+        "--score-col", args.hf_score_col or "replies",
+        "--id-col", args.hf_id_col or "no",
+        "--max_rows", str(args.max_rows),
+        "--min_words", str(args.min_words),
+        "--clean_sample_frac", str(args.clean_sample_frac),
+        "--out", str(args.hf_out),
+        "--seed", str(args.seed),
+    ]
+    if args.hf_source_name:
+        a += ["--source-name", args.hf_source_name]
+    if args.hf_ftan_model:
+        a += ["--ftan-model", args.hf_ftan_model,
+              "--ftan-device", str(args.hf_ftan_device or ""),
+              "--ftan-batch-size", str(args.hf_ftan_batch_size),
+              "--ftan-threshold", str(args.hf_ftan_threshold),
+              "--ftan-grey-low", str(args.hf_ftan_grey_low),
+              "--ftan-grey-high", str(args.hf_ftan_grey_high),
+              "--ftan-max-length", str(args.hf_ftan_max_length),
+              "--checkpoint_every", str(args.hf_checkpoint_every)]
+        if not args.hf_resume:
+            a += ["--no-resume"]
+    return a
+
+
+def step_fetch_hf(args) -> bool:
+    if not args.hf_dataset:
+        _notice("no --hf-dataset given, skipping hf fetch")
+        return False
+    _run("11_hf_fetch.py", build_hf_args(args))
     return True
 
 
@@ -177,16 +283,15 @@ def build_curate_args(args) -> list[str]:
 
 
 def step_curate(args) -> bool:
-    raw = Path(args.raw)
-    if not raw.is_dir() or not list(raw.glob("*.parquet")):
-        _notice(f"no candidates in {raw}, skipping curate")
+    if not any(_has_parquets(p) for p in args.raw.split(",")):
+        _notice(f"no candidates in {args.raw}, skipping curate")
         return False
     _run("08_reddit_curate.py", build_curate_args(args))
     return True
 
 
 def step_merge(args) -> bool:
-    """Turn curated banks into data/raw/reddit.parquet (unified schema)."""
+    """Turn curated banks into data/raw/community.parquet (unified schema)."""
     banks = Path(args.banks_out)
     parts = []
     for name in ("bank_a", "bank_b", "bank_c"):
@@ -203,10 +308,199 @@ def step_merge(args) -> bool:
     df = df.drop_duplicates(subset=["text"]).reset_index(drop=True)
 
     RAW_DIR.mkdir(parents=True, exist_ok=True)
-    out = RAW_DIR / "reddit.parquet"
+    out = RAW_DIR / "community.parquet"
     df.to_parquet(out, index=False)
-    print(f"\n### merge: {len(df):,} reddit rows -> {out}")
+    print(f"\n### merge: {len(df):,} community rows -> {out}")
     print(df.groupby(["source", "label"]).size().unstack(fill_value=0).to_string())
+    return True
+
+
+def step_merge_ftan(args) -> bool:
+    """Append FTAN-labeled candidates (label in (0,1)) to community.parquet.
+
+    Reads candidates_*.parquet from hf_out (e.g. data/4chan/raw) and merges
+    them into data/raw/community.parquet, preserving FTAN labels. Rows that
+    still carry label -1 (unsure, not yet manually fixed) are excluded.
+    """
+    src = Path(args.hf_out)
+    files = sorted(src.glob("candidates_*.parquet"))
+    if not files:
+        _notice(f"no FTAN candidates in {src}, skipping merge-ftan")
+        return False
+    parts = []
+    for p in files:
+        df = pd.read_parquet(p)
+        parts.append(df)
+    cand = pd.concat(parts, ignore_index=True)
+    before = len(cand)
+    cand = cand[cand["label"].isin((0, 1))]
+    after_label = len(cand)
+    cand = cand.drop_duplicates(subset=["text"]).reset_index(drop=True)
+    cand = cand.reindex(columns=UNIFIED_COLUMNS)
+    if not len(cand):
+        _notice(f"no confident FTAN rows (label in 0/1) in {src}; nothing to merge")
+        return False
+
+    out = RAW_DIR / "community.parquet"
+    if out.exists():
+        old = pd.read_parquet(out)
+        merged = pd.concat([old, cand], ignore_index=True)
+        merged = merged.drop_duplicates(subset=["text"]).reset_index(drop=True)
+        rows = len(merged)
+        added = rows - len(old)
+    else:
+        old = None
+        merged = cand
+        rows = len(merged)
+        added = rows
+    RAW_DIR.mkdir(parents=True, exist_ok=True)
+    merged.to_parquet(out, index=False)
+    print(f"\n### merge-ftan: {before:,} candidates -> "
+          f"{after_label:,} confident (label 0/1) -> +{added:,} into {out}")
+    print(merged.groupby(["source", "label"]).size().unstack(fill_value=0).to_string())
+    return True
+
+
+def review_hf_candidates(args) -> None:
+    """Stop (or regex-fallback) when FTAN labeling left label==-1 rows behind.
+
+    Called right after the fetch-hf step. Scans hf_out for candidates with
+    label -1 and either exits for manual review (default) or rewrites them
+    using regex classification (--hf-fallback-regex).
+    """
+    if not args.hf_dataset or not args.hf_ftan_model:
+        return
+    src = Path(args.hf_out)
+    files = sorted(src.glob("candidates_*.parquet"))
+    if not files:
+        return
+    parts = [pd.read_parquet(p) for p in files]
+    cand = pd.concat(parts, ignore_index=True)
+    unsure = cand[cand["label"] == -1]
+    if not len(unsure):
+        return
+    per_file = {p.name: int(pd.read_parquet(p)["label"].eq(-1).sum()) for p in files}
+    print(f"\n### [make_dataset] {len(unsure):,} rows labeled -1 (model unsure):")
+    for name, n in per_file.items():
+        if n:
+            print(f"  {name}: {n:,}")
+    if args.hf_fallback_regex:
+        from reddit_vocab import classify_regex
+        txt = unsure["text"].tolist()
+        cats = [classify_regex(t)["category"] for t in txt]
+        fix = {t: (1 if c == "attack" else 0) for t, c in zip(txt, cats) if c != "grey"}
+        drop = sum(1 for c in cats if c == "grey")
+        print(f"  --hf-fallback-regex: attack->1, emotional/clean->0, "
+              f"regex-grey dropped: {drop:,}")
+        kept = 0
+        for p in files:
+            df = pd.read_parquet(p)
+            m = df["label"] == -1
+            mapped = df.loc[m, "text"].map(fix)
+            df.loc[m, "label"] = mapped
+            df = df[df["label"].isin((0, 1))].reset_index(drop=True)
+            df.to_parquet(p, index=False)
+            kept += len(df)
+        print(f"  rewrote {len(files)} shards | kept {kept:,} rows | "
+              f"dropped {drop:,} regex-grey")
+        return
+    csv = src / "manual_check.csv"
+    if csv.exists():
+        fixed = pd.read_csv(csv)
+        fixed = fixed[fixed["label"].isin((0, 1))]
+        if len(fixed):
+            fix = dict(zip(fixed["text"].astype(str), fixed["label"].astype(int)))
+            for p in files:
+                df = pd.read_parquet(p)
+                m = df["label"] == -1
+                mapped = df.loc[m, "text"].astype(str).map(fix)
+                df.loc[m, "label"] = mapped
+                df = df[df["label"].isin((0, 1))].reset_index(drop=True)
+                df.to_parquet(p, index=False)
+            print(f"  applied {len(fixed):,} manual fixes from {csv.name}")
+    unsure = pd.concat([pd.read_parquet(p) for p in files], ignore_index=True)
+    unsure = unsure[unsure["label"] == -1]
+    if not len(unsure):
+        return
+    unsure.to_csv(csv, index=False,
+                  columns=["text", "origin_label", "label"])
+    print(f"\n  wrote {csv} ({len(unsure):,} rows) for manual review.")
+    print("  Fix the 'label' column to 0 or 1, then re-run the same command "
+          "to continue. Rows you fixed in place in the parquet are kept as-is "
+          "on resume; leftover -1 rows are excluded by merge-ftan.")
+    raise SystemExit(0)
+
+
+def _parse_source_caps(raw: str | None) -> dict[str, int]:
+    out: dict[str, int] = {}
+    if not raw:
+        return out
+    for part in raw.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if "=" not in part:
+            raise SystemExit(f"bad --source_caps token {part!r}; expected source=target")
+        src, cap = part.rsplit("=", 1)
+        out[src.strip()] = int(cap.strip())
+    return out
+
+
+def _stratified_sample(df: pd.DataFrame, cap: int, seed: int) -> pd.DataFrame:
+    """Downsample `df` to exactly `cap` rows, preserving label ratios."""
+    total = len(df)
+    if total <= cap:
+        return df
+    counts = df["label"].value_counts()
+    targets = (counts / total * cap).astype(int)
+    remainder = cap - targets.sum()
+    if remainder > 0:
+        for label in (counts / total * cap - targets).sort_values(ascending=False).index[:remainder]:
+            targets[label] += 1
+    parts = []
+    for label, n in targets.items():
+        g = df[df["label"] == label]
+        parts.append(g.sample(n=min(n, len(g)), random_state=seed))
+    return pd.concat(parts, ignore_index=True)
+
+
+def step_subsample(args) -> bool:
+    caps = _parse_source_caps(args.source_caps)
+    if not caps:
+        _notice("no --source_caps given, skipping subsample")
+        return False
+    path = RAW_DIR / "community.parquet"
+    if not path.exists():
+        _notice(f"{path} not found, skipping subsample")
+        return False
+    df = pd.read_parquet(path)
+    before = len(df)
+    parts = []
+    skipped = []
+    for src, cap in caps.items():
+        sub = df[df["source"] == src]
+        if len(sub) == 0:
+            skipped.append((src, cap, 0))
+            continue
+        sampled = _stratified_sample(sub, cap, args.subsample_seed)
+        parts.append(sampled)
+        if len(sampled) < len(sub):
+            print(f"  {src}: {len(sub):,} -> {len(sampled):,} (cap {cap:,})")
+        else:
+            skipped.append((src, cap, len(sub)))
+    for src, cap, n in skipped:
+        print(f"  {src}: {n:,} rows (cap {cap:,}, unchanged)")
+    # keep sources not in caps as-is
+    uncapped = df[~df["source"].isin(caps)]
+    if len(uncapped):
+        parts.append(uncapped)
+    if not parts:
+        _notice("nothing to write after subsample")
+        return False
+    out_df = pd.concat(parts, ignore_index=True)
+    out_df = out_df.drop_duplicates(subset=["text"]).reset_index(drop=True)
+    out_df.to_parquet(path, index=False)
+    print(f"  community.parquet: {before:,} -> {len(out_df):,} rows")
     return True
 
 
@@ -337,7 +631,7 @@ def main():
     ap.add_argument("--sources", nargs="*", default=None)
     ap.add_argument("--wiki_cap", type=int, default=350_000)
 
-    # fetch
+    # reddit fetch
     ap.add_argument("--api", action="store_true", help="fetch via Arctic Shift API")
     ap.add_argument("--dump", default=None,
                     help="local path or HTTP(S) URL of a comment dump (.zst/.jsonl)")
@@ -355,6 +649,59 @@ def main():
     ap.add_argument("--raw_out", default="data/reddit/raw")
     ap.add_argument("--flush_rows", type=int, default=500_000)
 
+    # 4chan fetch
+    ap.add_argument("--4chan", action="store_true", help="fetch 4chan candidates")
+    ap.add_argument("--chan-mode", choices=["live", "archive"], default="live")
+    ap.add_argument("--boards", default=None, help="comma-separated 4chan boards (live)")
+    ap.add_argument("--chan-board", default=None, help="single board for 4chan archive mode")
+    ap.add_argument("--chan-search", default=None, help="body search term (4chan archive)")
+    ap.add_argument("--chan_delay", type=float, default=1.0)
+    ap.add_argument("--chan-repeats", type=int, default=0,
+                    help="re-scan 4chan catalogs this many times (0 = off). "
+                         "Use with --chan-repeat-delay to accumulate threads over time.")
+    ap.add_argument("--chan-repeat-delay", type=float, default=300.0,
+                    help="seconds between catalog re-scans when --chan-repeats > 0")
+    ap.add_argument("--chan-threads-per-board", type=int, default=250,
+                    help="max threads to fetch per board per scan")
+    ap.add_argument("--chan_out", default="data/4chan/raw")
+
+    # hf dataset fetch (e.g. ylelauta/pol-4chan-augmented)
+    ap.add_argument("--hf-dataset", default=None, help="HF dataset id to load as candidates")
+    ap.add_argument("--hf-split", default="train", help="split to load (default: train)")
+    ap.add_argument("--hf-text-col", default=None)
+    ap.add_argument("--hf-source-col", default=None)
+    ap.add_argument("--hf-time-col", default=None)
+    ap.add_argument("--hf-score-col", default=None)
+    ap.add_argument("--hf-id-col", default=None)
+    ap.add_argument("--hf-source-name", default=None)
+    ap.add_argument("--hf_out", default="data/hf/raw")
+    ap.add_argument("--hf-ftan-model", default=None, help="use FTAN to label rows (path to model)")
+    ap.add_argument("--hf-ftan-device", default=None, help="cuda device for FTAN, e.g. 0")
+    ap.add_argument("--hf-ftan-batch-size", type=int, default=256)
+    ap.add_argument("--hf-ftan-threshold", type=float, default=0.5)
+    ap.add_argument("--hf-ftan-grey-low", type=float, default=0.30,
+                    help="FTAN p_off below this -> label 0 (confident clean)")
+    ap.add_argument("--hf-ftan-grey-high", type=float, default=0.70,
+                    help="FTAN p_off above this -> label 1 (confident offensive)")
+    ap.add_argument("--hf-exit-on-unsure", action=argparse.BooleanOptionalAction, default=True,
+                    help="after fetch-hf, stop if any label==-1 rows remain (default: on)")
+    ap.add_argument("--hf-fallback-regex", action="store_true",
+                    help="classify remaining label==-1 rows with regex instead of stopping")
+    ap.add_argument("--hf-ftan-max-length", type=int, default=128)
+    ap.add_argument("--hf-checkpoint-every", type=int, default=150_000,
+                    help="rows between FTAN checkpoints")
+    ap.add_argument("--hf-resume", action=argparse.BooleanOptionalAction, default=True,
+                    help="resume FTAN from checkpoint/parquet if present (default: on)")
+
+    # youtube fetch
+    ap.add_argument("--youtube", action="store_true", help="fetch YouTube comments")
+    ap.add_argument("--yt-api-key", default=None, help="YouTube Data API v3 key")
+    ap.add_argument("--yt-query", default="cat videos")
+    ap.add_argument("--yt-max-videos", type=int, default=20)
+    ap.add_argument("--yt-max-comments", type=int, default=200)
+    ap.add_argument("--yt-clean-frac", type=float, default=1.0)
+    ap.add_argument("--yt_out", default="data/youtube/raw")
+
     # curate
     ap.add_argument("--raw", default="data/reddit/raw",
                     help="candidate parquet dir/file for the curate step")
@@ -370,6 +717,13 @@ def main():
     ap.add_argument("--verify_frac", type=float, default=0.0)
     ap.add_argument("--verify_attack_conf", type=float, default=0.40)
     ap.add_argument("--verify_clean_conf", type=float, default=0.90)
+
+    # subsample (after merge, before normalize)
+    ap.add_argument("--source_caps", default=None,
+                    help="comma-separated source=target caps, e.g. "
+                         "'4chan=800000,youtube=500000,reddit=500000'. "
+                         "Sources not listed are kept as-is. Empty = no caps.")
+    ap.add_argument("--subsample_seed", type=int, default=42)
 
     # normalize / mutate / split / export
     ap.add_argument("--min_len", type=int, default=3)
@@ -412,15 +766,42 @@ def main():
 
     print(f"plan: {' -> '.join(steps)}", flush=True)
 
+    raw_dirs = [args.raw_out]
+    ran = {"fetch": False, "fetch-4chan": False, "fetch-hf": False, "fetch-youtube": False}
+
     if "download" in steps:
         step_download(args)
 
     if "fetch" in steps:
-        step_fetch(args)
+        ran["fetch"] = step_fetch(args)
+    if "fetch-4chan" in steps:
+        ran["fetch-4chan"] = step_fetch_4chan(args)
+    if "fetch-hf" in steps:
+        ran["fetch-hf"] = step_fetch_hf(args)
+    if "fetch-youtube" in steps:
+        ran["fetch-youtube"] = step_fetch_youtube(args)
+
+    if "fetch-hf" in steps and args.hf_ftan_model:
+        review_hf_candidates(args)
+
+    raw_dirs = [
+        d for d, ok in ((args.raw_out, ran["fetch"] or _has_parquets(args.raw_out)),
+                        (args.chan_out, ran["fetch-4chan"] or _has_parquets(args.chan_out)),
+                        (args.hf_out, ran["fetch-hf"] or _has_parquets(args.hf_out)),
+                        (args.yt_out, ran["fetch-youtube"] or _has_parquets(args.yt_out)))
+        if ok
+    ]
+    if raw_dirs:
+        args.raw = ",".join(raw_dirs)
+
     if "curate" in steps:
         step_curate(args)
     if "merge" in steps:
         step_merge(args)
+    if "merge-ftan" in steps:
+        step_merge_ftan(args)
+    if "subsample" in steps:
+        step_subsample(args)
 
     if "normalize" in steps:
         _run("02_normalize.py", build_normalize_args(args))

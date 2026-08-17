@@ -31,6 +31,7 @@ import random
 
 import numpy as np
 import pandas as pd
+from tqdm import tqdm
 
 from pathlib import Path
 
@@ -51,47 +52,64 @@ def _to_df(rows: list[dict]) -> pd.DataFrame:
 
 
 class FtanScorer:
-    """Lazy batched wrapper around the ftan-2.0 pipeline (GPU by default)."""
+    """Lazy batched wrapper around the ftan-2.0 model (GPU by default)."""
 
     def __init__(self, model_dir: str, device: str | None, batch_size: int):
         self.model_dir = model_dir
         self.device = device
         self.batch_size = batch_size
-        self._clf = None
+        self._tok = None
+        self._model = None
+        self._dev = None
 
     def _load(self):
-        from transformers import AutoModelForSequenceClassification, AutoTokenizer, pipeline
+        import torch
+        from transformers import AutoModelForSequenceClassification, AutoTokenizer
 
-        tok = AutoTokenizer.from_pretrained(self.model_dir)
-        model = AutoModelForSequenceClassification.from_pretrained(self.model_dir)
+        self._tok = AutoTokenizer.from_pretrained(self.model_dir)
+        self._model = AutoModelForSequenceClassification.from_pretrained(self.model_dir)
         dev = self.device
         if dev is not None and str(dev).isdigit():
-            dev = int(dev)  # torch.device wants an int or "cuda:0", not "0"
-        self._clf = pipeline(
-            "text-classification", model=model, tokenizer=tok, device=dev
-        )
+            dev = int(dev)
+        self._dev = dev if dev is not None else "cpu"
+        self._model.to(self._dev)
+        self._model.eval()
 
+    @torch.no_grad()
     def score(self, texts: list[str]) -> np.ndarray:
         """Return offensive probability (1 = offensive) for each text."""
         if not texts:
             return np.array([], dtype=np.float32)
-        if self._clf is None:
+        if self._model is None:
             self._load()
         scores = []
-        for i in range(0, len(texts), self.batch_size):
-            batch = texts[i : i + self.batch_size]
-            for out in self._clf(batch, batch_size=len(batch), truncation=True, max_length=128):
-                p = float(out["score"])
-                scores.append(p if out["label"] == "offensive" else 1.0 - p)
+        with tqdm(total=len(texts), desc="FTAN", unit="row", leave=False) as pbar:
+            for i in range(0, len(texts), self.batch_size):
+                batch = texts[i: i + self.batch_size]
+                enc = self._tok(batch, padding=True, truncation=True, max_length=128,
+                                return_tensors="pt")
+                enc = {k: v.to(self._dev) for k, v in enc.items()}
+                with torch.amp.autocast("cuda"):
+                    logits = self._model(**enc).logits
+                probs = logits.softmax(dim=-1).cpu().numpy()
+                for p in probs:
+                    off_p = float(p[1] if len(p) > 1 else p[0])
+                    scores.append(off_p)
+                pbar.update(len(batch))
         return np.asarray(scores, dtype=np.float32)
 
 
 def load_raw(raw: str) -> pd.DataFrame:
-    path = Path(raw)
-    if path.is_dir():
-        files = sorted(path.glob("*.parquet"))
-    else:
-        files = [path]
+    """Load candidates from one or more dirs/files (comma-separated)."""
+    parts = [p for p in (s.strip() for s in raw.split(",")) if p]
+    files = []
+    for part in parts:
+        path = Path(part)
+        if path.is_dir():
+            files += sorted(path.glob("*.parquet"))
+        else:
+            files.append(path)
+    files = sorted(set(files))
     if not files:
         raise SystemExit(f"no parquet files found in {raw}")
     frames = []
@@ -116,7 +134,7 @@ def bucket_rows(df: pd.DataFrame, rng) -> dict:
 
 def _meta_lookup(df: pd.DataFrame) -> dict:
     meta = {}
-    cols = [c for c in ("subreddit", "created_utc", "score") if c in df.columns]
+    cols = [c for c in ("source", "subreddit", "created_utc", "score") if c in df.columns]
     if not cols:
         return meta
     for t, values in zip(df["text"], df[cols].itertuples(index=False, name=None)):
@@ -127,8 +145,8 @@ def _meta_lookup(df: pd.DataFrame) -> dict:
 def _row(text: str, label: int, origin: str, category: str, meta: dict) -> dict:
     m = meta.get(text, {})
     return {
-        "text": text, "label": label, "source": "reddit", "origin_label": origin,
-        "split_origin": "train",
+        "text": text, "label": label, "source": m.get("source", "reddit"),
+        "origin_label": origin, "split_origin": "train",
         "subreddit": m.get("subreddit", ""),
         "created_utc": int(m.get("created_utc") or 0),
         "score": int(m.get("score") or 0),
@@ -159,8 +177,8 @@ def assign_grey(buckets: dict, ftan: FtanScorer, grey_low: float, grey_high: flo
 def _grey_row(text: str, prob: float, label: int, origin: str, meta: dict) -> dict:
     m = meta.get(text, {})
     return {
-        "text": text, "label": label, "source": "reddit", "origin_label": origin,
-        "split_origin": "train",
+        "text": text, "label": label, "source": m.get("source", "reddit"),
+        "origin_label": origin, "split_origin": "train",
         "subreddit": m.get("subreddit", ""),
         "created_utc": int(m.get("created_utc") or 0),
         "score": int(m.get("score") or 0),
@@ -274,9 +292,9 @@ def main():
 
     combined = _to_df(bank_a + bank_b + bank_c)
     combined = combined[combined.label != -1]
-    print(f"\ncombined reddit dataset: {len(combined):,} rows "
+    print(f"\ncombined community dataset: {len(combined):,} rows "
           f"(pos={int((combined.label == 1).sum()):,} neg={int((combined.label == 0).sum()):,})")
-    combined.to_parquet(out_dir / "reddit.parquet", index=False)
+    combined.to_parquet(out_dir / "community.parquet", index=False)
 
 
 if __name__ == "__main__":

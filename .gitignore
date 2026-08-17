@@ -5,6 +5,8 @@ data/raw/
 data/processed/
 data/final/
 data/reddit/
+data/4chan/
+data/youtube/
 cache-*.arrow
 .cache/
 .huggingface/
