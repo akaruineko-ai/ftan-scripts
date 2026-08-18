@@ -219,8 +219,27 @@ Models are anything `AutoModelForSequenceClassification.from_pretrained`
 accepts: a local directory or a Hugging Face Hub id. Argmax indices are mapped
 to `0/1` labels via the model's `config.id2label` when the names are
 recognizable (`clean`/`offensive`, `toxic`, `hate`, …); otherwise the index is
-used as-is. A warning is printed if the model has anything other than 2
-labels.
+used as-is.
+
+### Multi-class models
+
+Moderation models trained on more than two labels are reduced to binary
+predictions automatically: any class that is not a clean synonym (`ok`,
+`clean`, `normal`, `benign`, `neutral`, …) maps to `1/offensive`. This lets you
+score 9-class taxonomies like `KoalaAI/Text-Moderation` (`S/H/V/HR/SH/S3/H2/V2/OK`)
+on the ftan benchmark — `OK` counts as clean, every harmful category as
+offensive:
+
+```bash
+# automatic reduction from config.id2label
+.venv/bin/python scripts/benchmark.py --model KoalaAI/Text-Moderation
+
+# explicit class -> binary mapping (overrides the heuristic for covered names)
+.venv/bin/python scripts/benchmark.py --model KoalaAI/Text-Moderation \
+    --label_map '{"OK": 0, "S": 1, "H": 1, "V": 1, "HR": 1, "SH": 1, "S3": 1, "H2": 1, "V2": 1}'
+```
+
+The applied reduction is printed per model as `label reduction: {...}`.
 
 ### Arguments
 
@@ -231,6 +250,7 @@ labels.
 | `--batch_size` | `32` | inference batch size |
 | `--max_length` | `512` | token truncation length |
 | `--max_rows` | `None` | score only the first N rows (quick smoke runs) |
+| `--label_map` | `None` | JSON object mapping model class names to `0/1` (for multi-class models) |
 | `--device` | auto | device id, e.g. `0` |
 | `--out` | `data/final/benchmark/results.json` | metrics output |
 

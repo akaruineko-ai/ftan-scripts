@@ -64,7 +64,7 @@ printf "you are a f4gg0t and i hate you\nthanks for the help\n" \
 | `predict.py` | CLI inference | stdout |
 | `make_balanced.py` | rebalance the train split (~50/50) | rewritten `data/final/dataset` |
 | `make_benchmark.py` | export held-out test rows → benchmark parquet | `data/final/benchmark/benchmark.parquet` |
-| `benchmark.py` | score one/more models (local or HF Hub) on the benchmark, compare | `data/final/benchmark/results.json` |
+| `benchmark.py` | score one/more models (local or HF Hub, incl. multi-class like `KoalaAI/Text-Moderation`) on the benchmark, compare | `data/final/benchmark/results.json` |
 
 ## Typical larger workflows
 

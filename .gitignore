@@ -10,3 +10,4 @@ data/youtube/
 cache-*.arrow
 .cache/
 .huggingface/
+.eval_results/
