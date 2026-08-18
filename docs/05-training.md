@@ -162,6 +162,85 @@ clean      conf=0.997 | thanks for the help
 
 ---
 
+## make_benchmark.py — build the benchmark parquet
+
+Exports the held-out rows into a single parquet for scoring models on a
+consistent, balanced evaluation set:
+
+```bash
+.venv/bin/python scripts/make_benchmark.py
+```
+
+### What it does
+
+- Reads `data/processed/split.parquet`, takes the `test` rows (`benchmark_split
+  = "test"`), appends their mutated subset (the `test_obfuscated` rows,
+  `benchmark_split = "test_obfuscated"`), and writes
+  `data/final/benchmark/benchmark.parquet`.
+- Keeps the full schema (`text`, `label`, `source`, `origin_label`,
+  `split_origin`, `mutated`, `variant`, `cluster`, `benchmark_split`) so
+  scoring can be sliced by split, by plain/obfuscated, or by source.
+
+> `test_obfuscated` rows are a subset of `test`, so those texts appear twice in
+> the merged parquet — once per `benchmark_split`. Slice by `benchmark_split`
+> (or `mutated`) rather than summing rows across both.
+
+### Arguments
+
+| flag | default | meaning |
+|---|---|---|
+| `--split_file` | `data/processed/split.parquet` | pipeline parquet with a `split` column |
+| `--out` | `data/final/benchmark/benchmark.parquet` | output parquet path |
+
+---
+
+## benchmark.py — score models on the benchmark
+
+Runs one or more trained models over the benchmark parquet and reports
+accuracy / precision / recall / f1, sliced by benchmark split, by
+plain/obfuscated (`mutated`), and by source:
+
+```bash
+# one model
+.venv/bin/python scripts/benchmark.py --model data/final/model/model
+
+# compare several (final model + checkpoints)
+.venv/bin/python scripts/benchmark.py \
+    --model data/final/model/model \
+    --model data/final/model/checkpoints/checkpoint-300000
+
+# mix in Hugging Face Hub models
+.venv/bin/python scripts/benchmark.py \
+    --model data/final/model/model \
+    --model user/moderation-model
+```
+
+Models are anything `AutoModelForSequenceClassification.from_pretrained`
+accepts: a local directory or a Hugging Face Hub id. Argmax indices are mapped
+to `0/1` labels via the model's `config.id2label` when the names are
+recognizable (`clean`/`offensive`, `toxic`, `hate`, …); otherwise the index is
+used as-is. A warning is printed if the model has anything other than 2
+labels.
+
+### Arguments
+
+| flag | default | meaning |
+|---|---|---|
+| `--model` | *(required, repeatable)* | model to score: a local directory or a Hugging Face Hub id; pass once per model |
+| `--benchmark` | `data/final/benchmark/benchmark.parquet` | benchmark parquet |
+| `--batch_size` | `32` | inference batch size |
+| `--max_length` | `512` | token truncation length |
+| `--max_rows` | `None` | score only the first N rows (quick smoke runs) |
+| `--device` | auto | device id, e.g. `0` |
+| `--out` | `data/final/benchmark/results.json` | metrics output |
+
+### Output
+
+Per-model metrics (`overall`, `by_benchmark_split`, `by_mutated`,
+`by_source`) written to `results.json`, plus a printed per-model summary.
+
+---
+
 ## make_balanced.py — rebalance the train split
 
 The default build's train split is positive-biased (~63/37). This script

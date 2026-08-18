@@ -173,6 +173,7 @@ Caps are stratified by label, so each source keeps its offensive/clean ratio.
 | final dataset | `data/final/dataset` |
 | stats + card | `data/final/stats.json`, `data/final/dataset_card.md` |
 | model | `data/final/model/` |
+| benchmark | `data/final/benchmark/{benchmark.parquet,results.json}` |
 | community candidates | `data/{reddit,4chan,youtube,hf}/raw/candidates_*.parquet` |
 | banks | `data/reddit/banks/bank_{a,b,c}.parquet` |
 | seeds | `data/seeds/` |
