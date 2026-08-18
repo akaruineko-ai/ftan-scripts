@@ -8,6 +8,7 @@ Usage:
     .venv/bin/python scripts/train.py
     .venv/bin/python scripts/train.py --max_train_rows 200000 --epochs 1 --batch_size 32
     .venv/bin/python scripts/train.py --data_dir /path/to/dataset --output_dir runs/my-run
+    .venv/bin/python scripts/train.py --output_dir runs/my-run --resume auto
 
 Outputs (under --output_dir):
     model/              best checkpoint + tokenizer
@@ -43,6 +44,26 @@ def int_or_none(s):
     if s is None or str(s).strip().lower() in ("none", "all", ""):
         return None
     return int(s)
+
+
+def resolve_resume(out, resume):
+    """Return the checkpoint path to resume from (None = fresh run)."""
+    if resume is None or str(resume).strip().lower() in ("none", "false", ""):
+        return None
+    if str(resume).strip().lower() == "auto":
+        ckpts = sorted(
+            (d for d in os.listdir(f"{out}/checkpoints")
+             if d.startswith("checkpoint-")),
+            key=lambda d: int(d.split("-")[-1]),
+        )
+        if not ckpts:
+            raise SystemExit(f"no checkpoints found in {out}/checkpoints "
+                             "for --resume auto")
+        resume = os.path.join(out, "checkpoints", ckpts[-1])
+        print(f"[resume] auto -> {resume}")
+    if not os.path.isdir(resume):
+        raise SystemExit(f"resume checkpoint not found: {resume}")
+    return resume
 
 
 def resolve_max_length(tokenizer, ds, max_length, n=50_000, seed=42):
@@ -112,6 +133,9 @@ def main():
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--fp16", action="store_true",
                     help="mixed precision (may not speed up a GTX 1660 Ti)")
+    ap.add_argument("--resume", default=None,
+                    help="resume from this checkpoint path, or 'auto' to use "
+                         "the latest checkpoint in --output_dir/checkpoints")
     ap.add_argument("--push_to_hub", default=None,
                     help="push the trained model to this repo id (e.g. user/ftan-distilbert)")
     ap.add_argument("--private", action="store_true")
@@ -208,7 +232,7 @@ def main():
         processing_class=tokenizer,
     )
 
-    trainer.train()
+    trainer.train(resume_from_checkpoint=resolve_resume(out, args.resume))
 
     model_dir = f"{out}/model"
     trainer.save_model(model_dir)

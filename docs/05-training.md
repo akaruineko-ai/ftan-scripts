@@ -54,6 +54,7 @@ small GPUs.
 | `--logging_steps` | `200` | log interval |
 | `--seed` | `42` | RNG seed |
 | `--fp16` | off | mixed precision (may not speed up a GTX 1660 Ti) |
+| `--resume` | `None` | resume training from a checkpoint dir, or `auto` to use the latest checkpoint in `--output_dir/checkpoints` |
 | `--push_to_hub` | `None` | push the trained model to this repo id |
 | `--private` | off | make the pushed repo private |
 
@@ -61,6 +62,12 @@ small GPUs.
 
 - **Stratified subsampling** — `--max_train_rows` / `--max_val_rows` downsample
   while preserving the label ratio.
+- **Resuming** — `--resume <ckpt>` continues from a saved checkpoint (model,
+  optimizer, scheduler, RNG and dataloader state all restored). Use the *same*
+  `--output_dir`, `--data_dir`, subsample args, `--max_length`, `--batch_size`,
+  `--grad_accum` and `--lr` as the original run. `--epochs` is the **total**
+  epochs of the whole run, not "extra" epochs — remaining epochs are derived
+  from the checkpoint's `global_step`.
 - **Tokenization caches** go to `--output_dir/.cache/`, never next to the
   dataset, so no stray `cache-*.arrow` files corrupt the Hub folder.
 - Checkpoints go to `--output_dir/checkpoints/` (keeps the best 2 by `f1`).
