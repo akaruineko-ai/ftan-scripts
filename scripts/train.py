@@ -24,6 +24,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+from pathlib import Path
 
 import numpy as np
 import torch
@@ -181,10 +182,52 @@ class WeightedTrainer(Trainer):
         return (loss, outputs) if return_outputs else loss
 
 
+def discover_arrow_splits(base_dir):
+    """Return {split_name: [arrow_path, ...]} by globbing data-*.arrow shards.
+
+    Repos like akaruineko/fantastic-offensive store splits as folders of arrow
+    shards (dataset/train/data-00000-of-00002.arrow ...); the shard count varies
+    between repos, so we discover them rather than hardcoding the filenames.
+    """
+    base = Path(base_dir)
+    shards = sorted(p for p in base.rglob("*.arrow") if p.name.startswith("data-"))
+    by_split: dict[str, list[str]] = {}
+    for f in shards:
+        by_split.setdefault(f.parent.name, []).append(str(f))
+    return {k: v for k, v in sorted(by_split.items())}
+
+
+def load_hf_dataset(repo_id):
+    """Download a multi-label HF dataset repo and load its arrow shards.
+
+    Splits are discovered dynamically from the downloaded snapshot, so this
+    works whether a split has 1 shard or many (e.g. fantastic-offensive vs
+    decent-moderation differ in shard counts).
+    """
+    from datasets import Dataset, DatasetDict, load_dataset
+    from huggingface_hub import snapshot_download
+
+    local = snapshot_download(repo_id, repo_type="dataset")
+    by_split = discover_arrow_splits(local)
+    if not by_split:
+        raise SystemExit(f"no 'data-*.arrow' shards found in {repo_id} ({local})")
+    print(f"[dataset] {repo_id} -> splits: "
+          + ", ".join(f"{k}={len(v)}" for k, v in by_split.items()))
+    ds_splits = {
+        split: load_dataset("arrow", data_files=paths, split="train")
+        for split, paths in by_split.items()
+    }
+    return DatasetDict(ds_splits)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--model", default="distilbert-base-uncased")
     ap.add_argument("--data_dir", default=str(ML_DEFAULT_DIR))
+    ap.add_argument("--dataset", default=None,
+                    help="Hugging Face dataset repo id (multi-label, e.g. "
+                         "'akaruineko/decent-moderation') to download + load; "
+                         "when set it overrides --data_dir")
     ap.add_argument("--output_dir", default=str(FINAL_DIR / "model"))
     ap.add_argument("--multi_label", action=argparse.BooleanOptionalAction,
                     default=True,
@@ -238,7 +281,11 @@ def main():
     args = ap.parse_args()
 
     tokenizer = AutoTokenizer.from_pretrained(args.model)
-    dsd: DatasetDict = load_from_disk(args.data_dir)
+    if args.dataset:
+        print(f"[dataset] loading HF repo '{args.dataset}' (overrides --data_dir)")
+        dsd: DatasetDict = load_hf_dataset(args.dataset)
+    else:
+        dsd: DatasetDict = load_from_disk(args.data_dir)
     print("splits:", {k: len(v) for k, v in dsd.items()})
 
     multi = args.multi_label
