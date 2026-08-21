@@ -1,0 +1,1 @@
+python3 scripts/train.py --epochs 3 --batch_size 16 --max_train_rows None --max_length auto --save_strategy steps --save_steps 16000 --eval_steps 8000 --eval_strategy steps --pos_weight balanced --val_fraction 0.05
