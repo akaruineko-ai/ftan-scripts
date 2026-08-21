@@ -7,6 +7,7 @@ data/final/
 data/reddit/
 data/4chan/
 data/youtube/
+data/exps
 cache-*.arrow
 .cache/
 .huggingface/
